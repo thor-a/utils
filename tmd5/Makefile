@@ -1,0 +1,4 @@
+
+LDLIBS = -lmhash
+
+md5:
