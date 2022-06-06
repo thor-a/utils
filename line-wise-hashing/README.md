@@ -28,9 +28,18 @@ while read; do
 done
 ```
 
-
 ### Compile ###
 
 ```
 make
 ```
+
+### Another alternative ###
+
+An fairly efficient alternative is to use perl, e.g.:
+```
+seq 10 | perl -MDigest::MD5=md5_hex    -lpe '$_=md5_hex   ($_) . "\t" . $_'
+seq 10 | perl -MDigest::SHA=sha1_hex   -lpe '$_=sha1_hex  ($_) . "\t" . $_'
+seq 10 | perl -MDigest::SHA=sha256_hex -lpe '$_=sha256_hex($_) . "\t" . $_'
+```
+etc.
