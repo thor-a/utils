@@ -1,0 +1,328 @@
+#!/bin/zsh
+
+# Description:  Attempt at a general terminal previewer. E.g. used with fzf like this:
+#
+#     prv() {
+#       FZF_DEFAULT_COMMAND='find . -mindepth 1 -maxdepth 1 -print0' \
+#         fzf                      \
+#           --read0                \
+#           --print0               \
+#           --multi                \
+#           --ansi                 \
+#           --reverse              \
+#           --preview-window=top   \
+#           --preview='preview {}'
+#     }
+
+# Check if used programs ara available (coreutils are assumed to be available)
+needs() {
+  some_prog_needed=0
+  while [ -n "$1" ]; do
+    which $1 > /dev/null
+    if [ $? -ne 0 ]; then
+      printf "Warning: '%s' might be needed to run.\n" "$1" >&2
+      some_prog_needed=1
+    fi
+    shift
+  done
+  return $some_prog_needed
+}
+
+needed_progs=(
+  awk
+  bat
+  binwalk
+  column
+  file
+  ls.swp
+  jq
+  mlr
+  openssl
+  pdftocairo
+  pdftotext
+  ps2pdf
+  pup
+  python
+  readelf
+  sed
+  sox
+  sqlite3
+  tree
+  unzip
+  viu
+  wasm-objdump
+  xmlstarlet
+  xxd
+)
+
+needs $needed_progs
+
+
+# Functionality that is complicated or is used multiple times
+handle_x509() {
+  openssl    x509 -in "$1"             -noout -issuer -subject -email -startdate -enddate -purpose -fingerprint 2> /dev/null \
+  || openssl x509 -in "$1" -inform der -noout -issuer -subject -email -startdate -enddate -purpose -fingerprint 2> /dev/null
+}
+
+detect_csv() {
+  seps=$(printf "%s" ',' ';' ':' '|' $'\t')
+
+  (( $(wc -l < "$infile") < 3 )) && return
+
+  fold -w1 <<<"$seps"     | 
+  while IFS= read -r sep; do
+    nfields=$(head -n100 "$1" | 
+              awk -F "[$sep]+" '{print NF}' "$1" | sort -un)
+    nlines=$(print -l "$nfields" | wc -l)
+
+    print "$nfields $sep $nlines"
+  done          |
+
+  # Only balanced csv files allowed, i.e. nlines==1
+  awk '$3 == 1' |
+  tee /tmp/dims |
+
+  # Pick the one with most columns
+  sort -nr      |
+  head -n1
+}
+
+
+# Main program start
+progname=${0##*/}
+maxbytes=10000000
+
+# Establish temporary directory
+if [[ -d "$XDG_RUNTIME_DIR" && -w "$XDG_RUNTIME_DIR" ]]; then
+  tmpdir="$XDG_RUNTIME_DIR/$progname"
+else
+  tmpdir="/tmp/$progname"
+fi
+mkdir -p "$tmpdir"
+chmod go-rwx "$tmpdir"
+
+infile="$1"
+
+# Handle files coming from stdin
+if [[ -z "$infile" ]]; then
+  infile=$(mktemp "$tmpdir"/XXXXXX)
+  cat > "$infile"
+fi
+
+ext="${infile##*.}"
+fsz=$(stat -c '%s' "$infile")
+
+typeset -A csvoverride
+csvoverride[yml]=1
+csvoverride[yaml]=1
+csvoverride[key]=1
+
+if [[ -r "$infile" ]]; then
+
+  # limit handling of large files
+  if (( fsz > $maxbytes )); then
+    tmpfile=$(mktemp "$tmpdir"/XXXXXX)
+    head -c$maxbytes "$infile" > "$tmpfile"
+    infile="$tmpfile"
+  fi
+
+  file -Lbi "$infile" | sed 's/;//; s/[^ ]*=//' | read ftype encoding
+  description=$(file -L "$infile")
+  
+  print "$ftype; $encoding"
+  print "$description\n"
+
+  case $ftype in
+
+    (application/json)
+      jq -C . "$infile"
+      ;;
+
+    (application/octet-stream)
+      filedone=0
+
+      case "$ext" in
+        (crt)
+          handle_x509 "$infile"
+          filedone=1
+          ;;
+        (o|wasm)
+          if [[ "$description" =~ '.*wasm.*' ]]; then
+            wasm-objdump -h "$infile" | sed '1d; 2s/^[^ ]* //; 5d'
+            wasm-objdump -d "$infile" | sed '2,3d; 5d'
+            wasm-objdump -s "$infile" | sed '2,3d'
+            filedone=1
+          else
+            print "Unknown object format"
+          fi
+          ;;
+        (pfx)
+          PYTHONWARNINGS=ignore binwalk "$infile"
+          filedone=1
+          ;;
+        (swp)
+          ls.swp "$infile"
+          filedone=1
+          ;;
+      esac
+
+      if ! (( filedone )); then
+        if [[ "$description" =~ '.*Certificate.*' ]]; then
+          handle_x509 "$infile"
+        else
+          print "Unknown format ... attempting extraction with binwalk(1).\n"
+
+          binwalk "$infile" 2> /dev/null | sed '1,3d' | read offset _ desc
+
+          if [[ "$desc" =~ '.*Certificate.*' ]]; then
+            tmpfile=$(mktemp "$tmpdir"/XXXXXX)
+            dd if="$infile" bs=1 skip="$offset" status=none > "$tmpfile"
+            handle_x509 "$tmpfile"
+          else
+            print "Still unknown, doing a hexdump.\n"
+            xxd "$infile"
+          fi
+        fi
+      fi
+      ;;
+
+    (application/pdf)
+      tmpfile=$(mktemp "$tmpdir"/XXXXXX)
+      pdftotext "$infile" - > "$tmpfile"
+
+      if (( $(wc -l < $tmpfile) == 0 )); then
+        pdftocairo -png -singlefile "$infile" - | viu -
+      else
+        printf "%s\n" "$(<$tmpfile)"
+      fi
+      ;;
+
+    (application/postscript)
+      tmpfilepdf=$(mktemp "$tmpdir"/XXXXXX)
+      tmpfiletxt=$(mktemp "$tmpdir"/XXXXXX)
+
+      ps2pdf "$infile"      - > "$tmpfilepdf"
+      pdftotext $tmpfilepdf - > "$tmpfiletxt"
+
+      if (( $(wc -l < "$tmpfiletxt") == 0 )); then
+        pdftocairo -png -singlefile "$tmpilepdf" - | viu -
+      else
+        printf "%s\n" "$(<$tmpfiletxt)"
+      fi
+      ;;
+
+    (application/vnd.sqlite3)
+      # Generate a summary by printing rows, tables and columns with data type
+      print ".tables" | sqlite3 -init /dev/null "$infile" | fmt -w1 |
+      while read tbl; do
+        tblrows=$(print "select count(*) from $tbl" | sqlite3 -init /dev/null "$infile")
+        printf "$tblrows\t$tbl\t"
+
+        # Print column name and data type
+        print "pragma table_info($tbl)" | sqlite3 -init /dev/null "$infile" | 
+        awk -F'|' 'NR>1 { printf ", " } { printf "%s(%s)", $2, $3 } END { printf "\n" }'
+      done          |
+      grep -v '^0'  |
+      sort -n       |
+      column -t
+      ;;
+
+    (application/x-executable)
+      if [[ "$description" =~ '.*ELF.*' ]]; then
+        readelf -a "$infile"
+      fi
+      ;;
+
+    (application/zip)
+      unzip -l "$infile"
+      ;;
+
+    (audio/(ogg|x-wav))
+      soxi "$infile"
+      viu =(sox "$infile" -n spectrogram -o -)
+      ;;
+
+    (image/(gif|jpeg|png|x-portable-(bitmap|greymap|pixmap)))
+      viu "$infile" 2> /dev/null
+
+      if (( $? != 0 )); then
+        print "Warning: Not an image.\n"
+        if [[ "$encoding" == "us-ascii" ]]; then
+          bat -n "$infile"
+        fi
+      fi
+      ;;
+
+    (inode/directory) 
+      tree "$infile"
+      ;;
+
+    (inode/x-empty) 
+      print "Nothing to see here"
+      ;;
+
+    (text/(csv|plain|x-awk|x-perl))
+      detect_csv "$infile" | read nfields sep nlines
+
+      if [[ -z $csvoverride[$ext] ]] && [[ -n "$nlines" ]] && (( nfields > 1 )); then
+          print "CSV file detected:   sep:$sep   fields:$nfields   nlines:$nlines\n"
+          mlr --ifs "$sep" --icsv --opprint cat "$infile"
+      else
+
+        filedone=0
+
+        if   [[ "$description" =~ '.*PEM .*' ]]; then
+          handle_x509 "$infile"; filedone=1
+        elif [[ "$description" =~ '.*awk.*' ]]; then
+          bat -nfl awk "$infile"; filedone=1
+        elif [[ "$description" =~ '.*(perl|raku).*' ]]; then
+          bat -nfl perl "$infile"; filedone=1
+        fi
+
+        if ! (( filedone )); then
+          case "$ext" in
+            (js)
+              js-beautify "$infile" | bat -nfl js
+              ;;
+            (key)
+              openssl rsa -noout -text -in "$infile"
+              ;;
+            (*)
+              bat -nf "$infile"
+              ;;
+          esac
+        fi
+      fi
+      ;;
+
+    (text/html)
+      <"$infile" pup -c 'always'
+      ;;
+
+    (text/xml|image/svg+xml)
+      xml format -R "$infile" | bat -nfl xml
+      ;;
+
+    (*)
+      # Check for known extensions
+
+      case "$ext" in
+        (crt)
+          handle_x509 "$infile"
+          ;;
+        (*)
+          print "Unknown fileype, here is a hexdump:\n"
+          ;;
+      esac
+      ;;
+
+    esac
+  #print $ftype
+
+else
+  print "Unable to read file: '$infile'"
+fi
+
+# Cleanup temporary directory
+find "$tmpdir"             -type f -delete
+find "$tmpdir" -mindepth 1 -type d -delete
