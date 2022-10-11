@@ -76,8 +76,15 @@ needs $needed_progs
 
 # Functionality that is complicated or is used multiple times have their own functions
 handle_x509() {
-  openssl    x509 -in "$1"             -noout -issuer -subject -email -startdate -enddate -purpose -fingerprint 2> /dev/null \
-  || openssl x509 -in "$1" -inform der -noout -issuer -subject -email -startdate -enddate -purpose -fingerprint 2> /dev/null
+  if grep -q BEGIN "$1"; then
+    for i in $(seq 1 $(grep -c 'BEGIN' "$1")); do
+      awk '/BEGIN/ { n++ } n == d { f=1 } f; /END/ { f=0 }' d=$i "$1"                                    |
+      openssl x509 -noout -issuer -subject -email -startdate -enddate -purpose -fingerprint 2> /dev/null 
+      printf '\n'
+    done
+  else
+    openssl x509 -in "$1" -inform der -noout -issuer -subject -email -startdate -enddate -purpose -fingerprint 2> /dev/null
+  fi
 }
 
 detect_csv() {
