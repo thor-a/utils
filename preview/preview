@@ -71,7 +71,10 @@ needed_progs=(
   xxd
 )
 
-needs $needed_progs
+if [[ "$1" == "-n" ]]; then
+  needs $needed_progs
+  exit 1
+fi
 
 
 # Functionality that is complicated or is used multiple times have their own functions
@@ -345,6 +348,10 @@ if [[ -r "$infile" ]]; then
         fi
         ${prefix}readelf -a "$infile"
       fi
+      ;;
+
+    (application/x-tokyocabinet-btree)
+      tcbmgr list "$infile"
       ;;
 
     (application/zip)
