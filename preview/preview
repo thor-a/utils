@@ -71,7 +71,8 @@ needed_progs=(
   xxd
 )
 
-if [[ "$1" == "-n" ]]; then
+# list needed programs and exit
+if [[ "$1" == "-c" ]]; then
   needs $needed_progs
   exit 1
 fi
@@ -205,8 +206,10 @@ if [[ -r "$infile" ]]; then
       esac
 
       if ! (( filedone )); then
-        if [[ "$description" =~ '.*Certificate.*' ]]; then
+        if   [[ "$description" =~ '.*Certificate.*' ]]; then
           handle_x509 "$infile"
+        elif [[ "$description" =~ '.*DER Encoded Key Pair.*' ]]; then
+          openssl rsa -noout -text -inform DER -in "$infile"; filedone=1
         elif [[ "$description" =~ '.*Vim swap file.*' ]]; then
           filedone=1
         else
@@ -441,6 +444,10 @@ if [[ -r "$infile" ]]; then
           bat -nfl perl "$infile"; filedone=1
         elif [[ "$description" =~ '.*PGP signed message.*' ]]; then
           bat -nf "$infile"; filedone=1
+        elif [[ "$description" =~ '.*ISO-8859 text, with CR line terminators.*' ]]; then
+          # Assuming PETSCII
+          petcat "$infile" | sed -Ez 's:([^\n])\n{2}([^\n]):\1\n\2:g' | cat -s | bat -nf
+          filedone=1
         fi
 
         if ! (( filedone )); then
@@ -454,7 +461,7 @@ if [[ -r "$infile" ]]; then
             (json)
               jq -C . "$infile" || bat -nf "$infile"
               ;;
-            (key)
+            (key|pem)
               openssl rsa -noout -text -in "$infile"
               ;;
             (ps)
