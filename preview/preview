@@ -127,6 +127,12 @@ fi
 mkdir -p "$tmpdir"
 chmod go-rwx "$tmpdir"
 
+while (( $# > 1 )); do
+  $progname "$1"
+  shift
+  print "\n--\n"
+done
+
 infile="$1"
 
 # Handle files coming from stdin
